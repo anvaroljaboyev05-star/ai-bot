@@ -67,8 +67,9 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # 3 ta eng kuchli va bepul zaxira modellar ro'yxati
 AVAILABLE_MODELS = [
     "gemini-3.5-flash-lite",
-    "gemini-flash-latest",
     "gemini-flash-lite-latest",
+    "gemini-3.8-flash",
+    "gemini-flash-latest",
 ]
 
 
@@ -308,12 +309,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Gemini uchun formatlangan xotira ro'yxati
         gemini_history = list(history)
 
-        # Gemini chat sessiyasini boshlash
-        chat = gemini_model.start_chat(history=gemini_history)
-
-        # Javobni kutish (asinxron)
-        response = await chat.send_message_async(user_text)
-        reply_text = response.text
+        # Zaxira modellardan foydalangan holda javob olish
+        reply_text = await ask_gemini_with_fallback(user_text, gemini_history)
 
         if not reply_text:
             reply_text = "Kechirasiz, savolingizga javob shakllantirib bo'lmadi. Qaytadan urinib ko'ring."
