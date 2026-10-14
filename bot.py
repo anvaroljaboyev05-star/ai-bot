@@ -64,18 +64,35 @@ Qat'iy amal qilinishi shart bo'lgan asosiy qoidalar:
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# Gemini modelini yaratish (gemini-2.5-flash eng yangi, tez va bepul limitlarga juda mos)
-try:
-    gemini_model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        system_instruction=SYSTEM_INSTRUCTION,
-    )
-except Exception as e:
-    logger.warning(f"gemini-2.5-flash ulanmadi, zaxira modelga o'tilmoqda: {e}")
-    gemini_model = genai.GenerativeModel(
-        model_name="gemini-flash-latest",
-        system_instruction=SYSTEM_INSTRUCTION,
-    )
+# 3 ta eng kuchli va bepul zaxira modellar ro'yxati
+AVAILABLE_MODELS = [
+    "gemini-3.5-flash-lite",
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
+]
+
+
+async def ask_gemini_with_fallback(user_text: str, history: list) -> str:
+    """
+    So'rovni navbat bilan modellarga yuboradi.
+    Agar bittasida limit tugasa, darhol ikkinchisiga o'tib javob qaytaradi!
+    """
+    last_error = None
+    for model_name in AVAILABLE_MODELS:
+        try:
+            model = genai.GenerativeModel(
+                model_name=model_name,
+                system_instruction=SYSTEM_INSTRUCTION,
+            )
+            chat = model.start_chat(history=history)
+            response = await chat.send_message_async(user_text)
+            if response and response.text:
+                return response.text
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Model {model_name} band yoki xato berdi ({e}), keyingisiga o'tilmoqda...")
+            continue
+    raise last_error
 
 # 4. Foydalanuvchilarning suhbat tarixini xotirada saqlash
 # Har bir foydalanuvchi uchun oxirgi 20 ta xabar (10 ta savol + 10 ta javob)
