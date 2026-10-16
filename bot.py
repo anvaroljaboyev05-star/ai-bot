@@ -325,6 +325,58 @@ def escape_tg_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def convert_markdown_tables(text: str) -> str:
+    """Markdown jadvallarni Telegram uchun chiroyli ro'yxat formatiga aylantirish."""
+    lines = text.split("\n")
+    result = []
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        # Jadval qatorini aniqlash: | ... | ... | formatida
+        if line.startswith("|") and line.endswith("|") and line.count("|") >= 3:
+            table_lines = []
+            while i < len(lines) and lines[i].strip().startswith("|") and lines[i].strip().endswith("|"):
+                table_lines.append(lines[i].strip())
+                i += 1
+
+            # Jadval sarlavhasi va ma'lumotlarini ajratib olish
+            headers = []
+            data_rows = []
+            for tl in table_lines:
+                cells = [c.strip() for c in tl.strip("|").split("|")]
+                # Ajratuvchi qatorni tashlab yuborish (--- | --- | ---)
+                if all(re.match(r'^[-:]+$', c) for c in cells):
+                    continue
+                if not headers:
+                    headers = cells
+                else:
+                    data_rows.append(cells)
+
+            if headers and data_rows:
+                # Chiroyli formatda chiqarish
+                for idx, row in enumerate(data_rows, 1):
+                    entry_parts = []
+                    for h, val in zip(headers, row):
+                        h_clean = h.strip()
+                        val_clean = val.strip()
+                        if h_clean and val_clean and h_clean.lower() not in ("№", "#", "no"):
+                            entry_parts.append(f"<b>{h_clean}:</b> {val_clean}")
+                        elif h_clean.lower() in ("№", "#", "no"):
+                            continue
+                        elif val_clean:
+                            entry_parts.append(val_clean)
+                    if entry_parts:
+                        result.append(f"📌 <b>{idx}.</b> " + "\n     ".join(entry_parts))
+                        result.append("")
+            elif headers:
+                # Faqat sarlavha bor, ma'lumot yo'q
+                result.append(" | ".join(headers))
+        else:
+            result.append(lines[i])
+            i += 1
+    return "\n".join(result)
+
+
 def markdown_to_telegram_html(text: str) -> str:
     code_blocks = []
 
@@ -350,6 +402,10 @@ def markdown_to_telegram_html(text: str) -> str:
         return f"@@@INLINECODE{len(inline_codes)-1}@@@"
 
     text = re.sub(r"`([^`\n]+)`", save_inline_code, text)
+
+    # Jadvallarni chiroyli formatga aylantirish (escape_dan OLDIN)
+    text = convert_markdown_tables(text)
+
     text = escape_tg_html(text)
     text = re.sub(r"^(?:#{1,6})\s*(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
@@ -421,9 +477,6 @@ def get_response_inline_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔄 Qayta yozish", callback_data="action:regenerate"),
             InlineKeyboardButton("🗑 Tozalash", callback_data="action:clear"),
         ],
-        [
-            InlineKeyboardButton("👨‍💻 Dasturchi (@Oljaboyev_Anvar_2005)", url="https://t.me/Oljaboyev_Anvar_2005")
-        ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -433,7 +486,7 @@ def get_welcome_text(first_name: str) -> str:
         f"Assalomu alaykum, <b>{first_name}</b>!\n\n"
         "Men sizning eng aqlli, tezkor va ko'p qirrali <b>AI Yordamchingizman</b>.\n\n"
         "🚀 <b>Mening asosiy kuchim:</b>\n"
-        "⚡ <b>Dvigatellar:</b> Groq (Llama 3.3 / GPT-120B) + Google Gemini AI\n"
+        "⚡ <b>Tezkorlik:</b> Ultra-tezkor sun'iy intellekt texnologiyalari\n"
         "🔹 <b>Dasturlash:</b> Python, C++, JS, HTML va barcha tillarda kod yozish va xatolarni tuzatish\n"
         "🔹 <b>Aniq fanlar:</b> Matematika, fizika, mantiqiy masalalar\n"
         "🔹 <b>Ijod va Tarjima:</b> Maqolalar, insholar, xatlar va professional tarjimalar\n\n"
@@ -508,8 +561,7 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🛡 <b>Holat:</b> {'✅ Tasdiqlangan (Inson)' if user_id in verified_users else '❌ Tasdiqlanmagan'}\n"
         f"💬 <b>Xotiradagi xabarlar:</b> {msg_count} / 10 ta suhbat\n\n"
         "⚡ <b>AI Tizimi:</b>\n"
-        "• Asosiy: <b>Groq Ultra-Fast AI (Llama 3.3 / GPT-120B)</b> ⚡️\n"
-        "• Zaxira: <b>Google Gemini AI</b> ♊️\n"
+        "• <b>Ultra-tezkor sun'iy intellekt</b> ⚡️\n"
         "• Server: <b>24/7 Cloud Engine</b> 🌐\n\n"
         "👨‍💻 <b>Yaratuvchi:</b> O'ljaboyev Anvar (@Oljaboyev_Anvar_2005)"
     )
@@ -521,7 +573,7 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "ℹ️ <b>Qo'llanma va Imkoniyatlar:</b>\n\n"
-        "🔹 <b>Ikki karra quvvat:</b> Bot Groq va Google Gemini AI kombinatsiyasida chaqmoqdek tez ishlaydi.\n"
+        "🔹 <b>Ikki karra quvvat:</b> Bot eng zamonaviy sun'iy intellekt texnologiyalari bilan chaqmoqdek tez ishlaydi.\n"
         "🔹 <b>Xotira:</b> Bot oldingi 20 ta savol-javobni eslab qoladi va mantiqiy suhbat quradi.\n"
         "🔹 <b>Dasturlash:</b> Kodlarni chiroyli qutilarda taqdim etadi, nusxalash oson.\n"
         "🔹 <b>Mavzuni o'zgartirish:</b> '💬 Yangi mavzu' tugmasi orqali xotirani tozalashingiz mumkin.\n\n"
@@ -640,9 +692,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             history.append({"role": "model", "parts": [reply_text]})
 
             formatted = markdown_to_telegram_html(reply_text)
-            footer = f"\n\n⚡️ <i>Dvigatel: {engine}</i>"
             await query.message.reply_text(
-                formatted + footer,
+                formatted,
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_response_inline_keyboard(),
             )
@@ -717,9 +768,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, chunk in enumerate(chunks):
             html_chunk = markdown_to_telegram_html(chunk)
 
-            # Oxirgi bo'lak ostiga dvigatel belgisi va tezkor tugmalarni qo'yamiz
+            # Oxirgi bo'lak ostiga tezkor tugmalarni qo'yamiz
             if i == len(chunks) - 1:
-                html_chunk += f"\n\n⚡️ <i>Dvigatel: {engine_used}</i>"
                 reply_markup = get_response_inline_keyboard()
             else:
                 reply_markup = None
@@ -785,7 +835,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Anvar AI Bot is running 24/7 with Groq and Gemini!")
+        self.wfile.write(b"Anvar AI Bot is running 24/7!")
 
     def do_HEAD(self):
         self.send_response(200)
