@@ -10,11 +10,19 @@ import warnings
 from collections import deque
 from dotenv import load_dotenv
 
-# Kutubxonalardagi eskirish ogohlantirishlarini yashirish
+# Kutubxonalardagi ogohlantirishlarni yashirish
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 import google.generativeai as genai
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from groq import AsyncGroq
+from telegram import (
+    Update,
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+)
 from telegram.constants import ChatAction, ParseMode
 from telegram.request import HTTPXRequest
 from telegram.ext import (
@@ -27,60 +35,106 @@ from telegram.ext import (
     filters,
 )
 
-# 1. Muhit o'zgaruvchilarini (.env) yuklash
+# ----------------- 1. MUHIT O'ZGARUVCHILARI -----------------
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 if not TELEGRAM_BOT_TOKEN:
     print("XATO: TELEGRAM_BOT_TOKEN topilmadi! Iltimos, .env faylini tekshiring.")
     sys.exit(1)
 
-if not GEMINI_API_KEY:
-    print("XATO: GEMINI_API_KEY topilmadi! Iltimos, .env faylini tekshiring.")
-    sys.exit(1)
-
-# 2. Log yozishni sozlash
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# 3. Google Gemini AI ni sozlash
-genai.configure(api_key=GEMINI_API_KEY)
+# ----------------- 2. AI DUAL-ENGINE SOZLAMALARI -----------------
+# 1-Dvigatel: Groq (Ultra-tezkor Llama & GPT-OSS modellar)
+groq_client = None
+if GROQ_API_KEY:
+    try:
+        groq_client = AsyncGroq(api_key=GROQ_API_KEY)
+        logger.info("Groq AI mijozi muvaffaqiyatli ishga tushirildi.")
+    except Exception as e:
+        logger.warning(f"Groq mijozini yaratishda xato: {e}")
 
-SYSTEM_INSTRUCTION = """
-Siz aqlli, har tomonlama yordam beruvchi, xushmuomala va kuchli sun'iy intellekt (AI) yordamchisisiz.
+GROQ_MODELS = [
+    "openai/gpt-oss-120b",  # 120-Billion parameter kuchli aql va tezlik
+    "openai/gpt-oss-20b",   # Ultra-tezkor zaxira
+    "qwen/qwen3.8-27b",     # Qo'shimcha zaxira
+]
 
-Qat'iy amal qilinishi shart bo'lgan asosiy qoidalar:
-1. Tilga moslashish: Foydalanuvchi qaysi tilda murojaat qilsa (o'zbek, rus, ingliz va h.k.), aynan o'sha tilda mukammal, ravon va grammatik to'g'ri javob bering.
-2. Har tomonlama bilim: Dasturlash (kod yozish va xatolarni tuzatish), matematika, fizika, tarjima, maqola/xat yozish, ilmiy va kundalik hayotiy maslahatlar bo'yicha aniq va mantiqiy javoblar bering.
-3. Yaratuvchi va Admin haqida: Agar foydalanuvchi "seni kim yaratgan?", "muallifing kim?", "admin kim?", "admin bilan qanday bog'lansa bo'ladi?" deb so'rasa, "Meni O'ljaboyev Anvar yaratgan. Admin: @Oljaboyev_Anvar_2005 (https://t.me/Oljaboyev_Anvar_2005)" deb javob bering.
-4. AI ekanlikni yashirmaslik: Siz sun'iy intellektsiz (AI). Buni aslo yashirmang va o'zingizni inson deb da'vo qilmang. O'ljaboyev Anvar tomonidan yaratilgan va sozlangan kuchli AI yordamchi ekanligingizni e'tirof eting.
-5. Dizayn va Chiroyli ko'rinish (MUHIM):
-   - Javoblarni Telegramda chiroyli, tartibli va ko'rkam qilib taqdim eting.
-   - Ro'yxatlar tuzishda keraksiz yulduzcha (*) va belgilarni ko'paytirmang. Bandlarni chiroyli belgilardan (🔹, 📌, 1., 2.) foydalanib yozing.
-   - Har qanday dasturlash kodini albatta alohida blok qilib (```dasturlash_tili\\nkod\\n```) ichida yozing. Kod boshqa matnlardan yaqqol ajralib, alohida chiroyli kod qutisi sifatida turishi shart.
-"""
+# 2-Dvigatel: Google Gemini (Zaxira dvigatel)
+if GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        logger.info("Google Gemini AI muvaffaqiyatli sozlandi.")
+    except Exception as e:
+        logger.warning(f"Gemini sozlashda xato: {e}")
 
-# Zaxira modellar ro'yxati (Biri band bo'lsa darhol ikkinchisiga o'tadi)
-AVAILABLE_MODELS = [
+GEMINI_MODELS = [
     "gemini-3.5-flash-lite",
     "gemini-flash-lite-latest",
     "gemini-3.8-flash",
     "gemini-flash-latest",
 ]
 
+SYSTEM_INSTRUCTION = """
+Siz aqlli, har tomonlama yordam beruvchi, xushmuomala va dunyodagi eng ilg'or sun'iy intellekt (AI) yordamchisisiz.
 
-async def ask_gemini_with_fallback(user_text: str, history: list) -> str:
-    """
-    So'rovni navbat bilan modellarga yuboradi.
-    Agar bittasida limit tugasa, darhol ikkinchisiga o'tib javob qaytaradi!
-    """
-    last_error = None
-    for model_name in AVAILABLE_MODELS:
+Qat'iy amal qilinishi shart bo'lgan qoidalar:
+1. Tilga moslashish: Foydalanuvchi qaysi tilda murojaat qilsa (o'zbek, rus, ingliz va h.k.), aynan o'sha tilda mukammal, ravon va grammatik to'g'ri javob bering.
+2. Har tomonlama bilim: Dasturlash (barcha tillarda toza kod yozish va xatolarni tushuntirib to'g'irlash), matematika, fizika, tarjima, maqola/xat yozish, ilmiy va kundalik hayotiy maslahatlar bo'yicha aniq va mantiqiy javoblar bering.
+3. Yaratuvchi va Admin haqida: Agar foydalanuvchi "seni kim yaratgan?", "muallifing kim?", "admin kim?", "admin bilan qanday bog'lansa bo'ladi?" deb so'rasa, "Meni O'ljaboyev Anvar yaratgan. Admin: @Oljaboyev_Anvar_2005 (https://t.me/Oljaboyev_Anvar_2005)" deb javob bering.
+4. AI ekanlikni yashirmaslik: Siz sun'iy intellektsiz (AI). Buni aslo yashirmang. O'ljaboyev Anvar tomonidan yaratilgan va sozlangan kuchli AI yordamchi ekanligingizni e'tirof eting.
+5. Dizayn va Ko'rinish (MUHIM):
+   - Javoblarni Telegramda chiroyli, tartibli va ko'rkam qilib taqdim eting.
+   - Ro'yxatlar tuzishda keraksiz yulduzcha (*) va panjaralarni (#) ko'paytirmang. Bandlarni chiroyli belgilardan (🔹, 📌, 1., 2.) foydalanib yozing.
+   - Har qanday dasturlash kodini albatta alohida blok qilib (```dasturlash_tili\nkod\n```) ichida yozing. Kod boshqa matnlardan yaqqol ajralib, alohida chiroyli kod qutisi sifatida turishi shart.
+"""
+
+
+async def ask_groq_ai(user_text: str, history: list) -> str:
+    """1-Dvigatel: Groq orqali ultra-tezkor javob olish."""
+    if not groq_client:
+        raise ValueError("Groq mijozi sozlanmagan")
+
+    messages = [{"role": "system", "content": SYSTEM_INSTRUCTION}]
+    for msg in history:
+        role = "user" if msg.get("role") == "user" else "assistant"
+        content = msg.get("parts", [""])[0] if "parts" in msg else msg.get("content", "")
+        if content:
+            messages.append({"role": role, "content": content})
+
+    messages.append({"role": "user", "content": user_text})
+
+    last_err = None
+    for model_name in GROQ_MODELS:
+        try:
+            resp = await groq_client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=4096,
+            )
+            ans = resp.choices[0].message.content
+            if ans and ans.strip():
+                return ans.strip()
+        except Exception as e:
+            last_err = e
+            logger.warning(f"Groq {model_name} xato berdi ({e}), keyingisiga o'tilmoqda...")
+            continue
+    raise last_err or Exception("Groq modellari javob bera olmadi")
+
+
+async def ask_gemini_ai(user_text: str, history: list) -> str:
+    """2-Dvigatel (Zaxira): Google Gemini AI."""
+    last_err = None
+    for model_name in GEMINI_MODELS:
         try:
             model = genai.GenerativeModel(
                 model_name=model_name,
@@ -89,20 +143,37 @@ async def ask_gemini_with_fallback(user_text: str, history: list) -> str:
             chat = model.start_chat(history=history)
             response = await chat.send_message_async(user_text)
             if response and response.text:
-                return response.text
+                return response.text.strip()
         except Exception as e:
-            last_error = e
-            logger.warning(f"Model {model_name} band yoki xato berdi ({e}), keyingisiga o'tilmoqda...")
+            last_err = e
+            logger.warning(f"Gemini {model_name} xato berdi ({e}), keyingisiga o'tilmoqda...")
             continue
-    raise last_error
+    raise last_err or Exception("Gemini modellari javob bera olmadi")
 
 
-# ----------------- 4. BAZA VA CAPTCHA XAVFSIZLIK TIZIMI -----------------
+async def ask_dual_engine(user_text: str, history: list) -> tuple[str, str]:
+    """
+    Kombinatsiya: Avval Groq (0.3 soniyada javob), agar muammo bo'lsa Gemini!
+    Qaytaradi: (javob_matni, ishlatilgan_dvigatel_nomi)
+    """
+    # 1. Avval Groq AI orqali harakat qilamiz
+    if groq_client:
+        try:
+            ans = await ask_groq_ai(user_text, history)
+            return ans, "Groq (GPT-120B) ⚡️"
+        except Exception as e:
+            logger.warning(f"Groq ishlamadi ({e}), zaxira Gemini dvigateliga o'tilmoqda...")
+
+    # 2. Agar Groq bo'lmasa yoki xato bersa, Gemini ga o'tamiz
+    ans = await ask_gemini_ai(user_text, history)
+    return ans, "Google Gemini ♊️"
+
+
+# ----------------- 3. BAZA VA CAPTCHA XAVFSIZLIK TIZIMI -----------------
 DB_PATH = "bot_users.db"
 
 
 def init_db():
-    """Tasdiqlangan foydalanuvchilar jadvalini yaratish."""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -123,7 +194,6 @@ def init_db():
 
 
 def load_verified_users() -> set:
-    """Server qayta yonganda ham tasdiqlangan insonlarni xotiraga yuklash."""
     init_db()
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -138,7 +208,6 @@ def load_verified_users() -> set:
 
 
 def save_verified_user(user_id: int, first_name: str = "", username: str = ""):
-    """Yangi tasdiqlangan foydalanuvchini bazaga yozish."""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -155,37 +224,29 @@ def save_verified_user(user_id: int, first_name: str = "", username: str = ""):
         logger.error(f"Foydalanuvchini saqlashda xato: {e}")
 
 
-# Tasdiqlangan foydalanuvchilar to'plami (O(1) tezlikda tekshirish uchun)
 verified_users = load_verified_users()
 active_captchas = {}  # user_id -> to'g'ri javob
 
-# ----------------- 5. ANTI-FLOOD & RATE LIMITING -----------------
+# ----------------- 4. ANTI-FLOOD & RATE LIMITING -----------------
 user_request_times = {}  # user_id -> deque of timestamps
-user_blacklist = {}  # user_id -> unban_timestamp (float)
+user_blacklist = {}      # user_id -> unban_timestamp (float)
 
-RATE_LIMIT_SECONDS = 2.0
+RATE_LIMIT_SECONDS = 1.5
 FLOOD_WINDOW_SECONDS = 3.0
 FLOOD_MAX_REQUESTS = 5
 BAN_DURATION_SECONDS = 600.0  # 10 daqiqa
 
 
 def check_anti_flood(user_id: int) -> tuple[bool, str]:
-    """
-    Foydalanuvchi spambot yoki flood qilayotganini tekshiradi.
-    Qaytaradi: (ruxsat_berilganmi, sabab)
-    """
     now = time.time()
 
-    # 1. Qora ro'yxatni tekshirish
     if user_id in user_blacklist:
         unban_time = user_blacklist[user_id]
         if now < unban_time:
-            # Bloklangan: server resursini tejash uchun jim tashlab yuboramiz
             return False, "banned"
         else:
             del user_blacklist[user_id]
 
-    # 2. Flood aniqlash (3 soniyada 5 tadan ko'p xabar)
     if user_id not in user_request_times:
         user_request_times[user_id] = deque(maxlen=10)
 
@@ -197,10 +258,9 @@ def check_anti_flood(user_id: int) -> tuple[bool, str]:
 
     if len(times) >= FLOOD_MAX_REQUESTS:
         user_blacklist[user_id] = now + BAN_DURATION_SECONDS
-        logger.warning(f"🚨 FLOOD ATTACK! User {user_id} 10 daqiqaga bloklandi.")
+        logger.warning(f"FLOOD ATTACK! User {user_id} 10 daqiqaga bloklandi.")
         return False, "flood_ban"
 
-    # 3. Rate limiting (Har 2 soniyada maksimal 1 ta so'rov)
     if len(times) >= 2:
         prev_time = times[-2]
         if now - prev_time < RATE_LIMIT_SECONDS:
@@ -227,7 +287,7 @@ def generate_captcha(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
 
     buttons = [
         InlineKeyboardButton(
-            text=str(opt),
+            text=f"👉 {opt}",
             callback_data=f"cap:{user_id}:{opt}",
         )
         for opt in options
@@ -241,33 +301,31 @@ def generate_captcha(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     )
 
     text = (
-        "🤖 <b>Xavfsizlik tekshiruvi (Anti-Spam Gate)</b>\n\n"
-        "Botdan to'liq foydalanish uchun inson ekanligingizni tasdiqlang:\n"
+        "🛡️ <b>Xavfsizlik tekshiruvi (Anti-Spam Gate)</b>\n\n"
+        "Botdan foydalanish uchun inson ekanligingizni tasdiqlang:\n"
         f"👉 <b>{num1} + {num2} = ?</b>\n\n"
         "<i>To'g'ri javobni pastdagi tugmalardan tanlang:</i>"
     )
     return text, keyboard
 
 
-# ----------------- 6. XOTIRA VA TELEGRAM FORMATLASH -----------------
+# ----------------- 5. XOTIRA VA TELEGRAM FORMATLASH -----------------
 MAX_HISTORY_LENGTH = 20
 user_chat_histories = {}
+user_last_prompts = {}  # user_id -> oxirgi savoli (qayta yozish uchun)
 
 
 def get_user_history(user_id: int) -> deque:
-    """Foydalanuvchining xotira navbatini qaytaradi."""
     if user_id not in user_chat_histories:
         user_chat_histories[user_id] = deque(maxlen=MAX_HISTORY_LENGTH)
     return user_chat_histories[user_id]
 
 
 def escape_tg_html(text: str) -> str:
-    """Telegram HTML talab qiladigan asosiy belgilarni xavfsiz qiladi."""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def markdown_to_telegram_html(text: str) -> str:
-    """AI javobidagi Markdown belgilarini Telegram uchun chiroyli HTML ga aylantiradi."""
     code_blocks = []
 
     def save_code_block(match):
@@ -308,7 +366,6 @@ def markdown_to_telegram_html(text: str) -> str:
 
 
 def split_message_text(text: str, max_chunk_size: int = 4000) -> list[str]:
-    """Telegram xabar limiti (4096 belgi) dan oshib ketmasligi uchun bo'laklarga ajratadi."""
     if len(text) <= max_chunk_size:
         return [text]
 
@@ -336,7 +393,6 @@ def split_message_text(text: str, max_chunk_size: int = 4000) -> list[str]:
 
 
 async def keep_typing_action(chat_id: int, context: ContextTypes.DEFAULT_TYPE, stop_event: asyncio.Event):
-    """AI javob tayyorlayotgan vaqtda 'yozmoqda...' holatini ko'rsatib turish."""
     while not stop_event.is_set():
         try:
             await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
@@ -348,52 +404,72 @@ async def keep_typing_action(chat_id: int, context: ContextTypes.DEFAULT_TYPE, s
             pass
 
 
-# ----------------- 7. BUYRUQLAR (COMMANDS) -----------------
+# ----------------- 6. YANGI ELITA DIZAYN (KLAVIATURALAR) -----------------
+def get_main_keyboard() -> ReplyKeyboardMarkup:
+    """Doimiy pastki chiroyli menyu tugmalari."""
+    keyboard = [
+        [KeyboardButton("💬 Yangi mavzu (/clear)"), KeyboardButton("📊 Mening profilim")],
+        [KeyboardButton("ℹ️ Bot haqida"), KeyboardButton("👨‍💻 Admin bilan aloqa")],
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
+
+
+def get_response_inline_keyboard() -> InlineKeyboardMarkup:
+    """Har bir javob ostidagi tezkor amallar paneli."""
+    keyboard = [
+        [
+            InlineKeyboardButton("🔄 Qayta yozish", callback_data="action:regenerate"),
+            InlineKeyboardButton("🗑 Tozalash", callback_data="action:clear"),
+        ],
+        [
+            InlineKeyboardButton("👨‍💻 Dasturchi (@Oljaboyev_Anvar_2005)", url="https://t.me/Oljaboyev_Anvar_2005")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
 def get_welcome_text(first_name: str) -> str:
     return (
         f"Assalomu alaykum, <b>{first_name}</b>!\n\n"
-        "Men har tomonlama yordam bera oladigan kuchli <b>AI yordamchiman</b>.\n\n"
-        "Quyidagi sohalarda sizga yordam bera olaman:\n"
-        "🔹 Dasturlash va kodlardagi xatolarni tuzatish\n"
-        "🔹 Matematika va ilmiy masalalar\n"
-        "🔹 Matnlar yaratish, tahrirlash va tarjima qilish\n"
-        "🔹 Turli mavzularda maslahat va tahlillar\n\n"
-        "Menga xohlagan tilingizda (o'zbek, rus, ingliz...) yozishingiz mumkin.\n\n"
-        "📌 <b>Asosiy buyruqlar:</b>\n"
-        "• /clear — Xotirani tozalash\n"
-        "• /help — Bot haqida ma'lumot\n"
-        "• /admin — Admin bilan bog'lanish\n\n"
-        "Savolingizni yozavering, men tayyorman!"
+        "Men sizning eng aqlli, tezkor va ko'p qirrali <b>AI Yordamchingizman</b>.\n\n"
+        "🚀 <b>Mening asosiy kuchim:</b>\n"
+        "⚡ <b>Dvigatellar:</b> Groq (Llama 3.3 / GPT-120B) + Google Gemini AI\n"
+        "🔹 <b>Dasturlash:</b> Python, C++, JS, HTML va barcha tillarda kod yozish va xatolarni tuzatish\n"
+        "🔹 <b>Aniq fanlar:</b> Matematika, fizika, mantiqiy masalalar\n"
+        "🔹 <b>Ijod va Tarjima:</b> Maqolalar, insholar, xatlar va professional tarjimalar\n\n"
+        "💡 <i>Menga xohlagan tilingizda yozing. Pastdagi tugmalar orqali xotirani tozalashingiz yoki profilingizni ko'rishingiz mumkin!</i>\n\n"
+        "Savolingizni yozavering, men tayyorman! 👇"
     )
 
 
+# ----------------- 7. BUYRUQLAR (COMMANDS) -----------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Foydalanuvchi /start bosganda xavfsizlik va salomlashish."""
     user = update.effective_user
     if not user:
         return
     user_id = user.id
 
-    # 1. Anti-flood tekshiruvi
     allowed, reason = check_anti_flood(user_id)
     if not allowed:
         if reason == "flood_ban":
             await update.message.reply_text("⚠️ Juda ko'p so'rov yubordingiz. Iltimos, 10 daqiqa kuting.")
         return
 
-    # 2. CAPTCHA Gate (Agar yangi foydalanuvchi bo'lsa, avval tekshiruv!)
+    # CAPTCHA tekshiruvi
     if user_id not in verified_users:
         text, kb = generate_captcha(user_id)
         await update.message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
         return
 
-    # 3. Tasdiqlangan foydalanuvchiga to'liq menyuni ochish
     first_name = escape_tg_html(user.first_name) if user.first_name else "Do'stim"
-    await update.message.reply_text(get_welcome_text(first_name), parse_mode=ParseMode.HTML)
+    await update.message.reply_text(
+        get_welcome_text(first_name),
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_main_keyboard(),
+    )
 
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Foydalanuvchi suhbat tarixini tozalash."""
     user = update.effective_user
     if not user:
         return
@@ -403,107 +479,179 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed:
         return
 
-    if user_id not in verified_users:
-        text, kb = generate_captcha(user_id)
-        await update.message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
-        return
-
     if user_id in user_chat_histories:
         user_chat_histories[user_id].clear()
+    user_last_prompts.pop(user_id, None)
 
     await update.message.reply_text(
-        "🗑 <b>Suhbat xotirasi tozalandi!</b> Endi yangi mavzuni bemalol noldan boshlashimiz mumkin.",
+        "🗑 <b>Suhbat xotirasi tozalandi!</b>\n"
+        "Endi yangi mavzuni bemalol noldan boshlashimiz mumkin.",
         parse_mode=ParseMode.HTML,
+        reply_markup=get_main_keyboard(),
+    )
+
+
+async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Foydalanuvchi profili va tizim holati."""
+    user = update.effective_user
+    if not user:
+        return
+    user_id = user.id
+
+    history = get_user_history(user_id)
+    msg_count = len(history) // 2
+
+    profile_text = (
+        "📊 <b>Sizning profilingiz:</b>\n\n"
+        f"👤 <b>Ism:</b> {escape_tg_html(user.full_name)}\n"
+        f"🆔 <b>Telegram ID:</b> <code>{user_id}</code>\n"
+        f"🛡 <b>Holat:</b> {'✅ Tasdiqlangan (Inson)' if user_id in verified_users else '❌ Tasdiqlanmagan'}\n"
+        f"💬 <b>Xotiradagi xabarlar:</b> {msg_count} / 10 ta suhbat\n\n"
+        "⚡ <b>AI Tizimi:</b>\n"
+        "• Asosiy: <b>Groq Ultra-Fast AI (Llama 3.3 / GPT-120B)</b> ⚡️\n"
+        "• Zaxira: <b>Google Gemini AI</b> ♊️\n"
+        "• Server: <b>24/7 Cloud Engine</b> 🌐\n\n"
+        "👨‍💻 <b>Yaratuvchi:</b> O'ljaboyev Anvar (@Oljaboyev_Anvar_2005)"
+    )
+    await update.message.reply_text(
+        profile_text, parse_mode=ParseMode.HTML, reply_markup=get_main_keyboard()
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Yordam bo'limi."""
-    keyboard = [
-        [InlineKeyboardButton("👨‍💻 Admin bilan bog'lanish", url="https://t.me/Oljaboyev_Anvar_2005")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     help_text = (
         "ℹ️ <b>Qo'llanma va Imkoniyatlar:</b>\n\n"
-        "🔹 Bot suhbat davomida oxirgi 20 ta xabarni xotirada saqlab turadi.\n"
-        "🔹 Mavzu o'zgarsa, /clear buyrug'i orqali yangi suhbat boshlang.\n"
-        "🔹 Kodlar va matnlar alohida chiroyli dizaynda taqdim etiladi.\n\n"
-        "👨‍💻 <b>Yaratuvchi:</b> O'ljaboyev Anvar\n"
-        "👉 <b>Telegram:</b> @Oljaboyev_Anvar_2005\n"
-        "⚡️ <b>AI Dvigateli:</b> Google Gemini AI"
+        "🔹 <b>Ikki karra quvvat:</b> Bot Groq va Google Gemini AI kombinatsiyasida chaqmoqdek tez ishlaydi.\n"
+        "🔹 <b>Xotira:</b> Bot oldingi 20 ta savol-javobni eslab qoladi va mantiqiy suhbat quradi.\n"
+        "🔹 <b>Dasturlash:</b> Kodlarni chiroyli qutilarda taqdim etadi, nusxalash oson.\n"
+        "🔹 <b>Mavzuni o'zgartirish:</b> '💬 Yangi mavzu' tugmasi orqali xotirani tozalashingiz mumkin.\n\n"
+        "👨‍💻 <b>Muallif:</b> O'ljaboyev Anvar\n"
+        "👉 <b>Telegram:</b> @Oljaboyev_Anvar_2005"
     )
-    await update.message.reply_text(help_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    await update.message.reply_text(
+        help_text, parse_mode=ParseMode.HTML, reply_markup=get_main_keyboard()
+    )
 
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin bilan bog'lanish buyrug'i."""
-    keyboard = [
-        [InlineKeyboardButton("💬 Anvarga xabar yozish (@Oljaboyev_Anvar_2005)", url="https://t.me/Oljaboyev_Anvar_2005")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     admin_text = (
         "👨‍💻 <b>Bot administratori va yaratuvchisi:</b>\n"
         "O'ljaboyev Anvar\n\n"
         "👉 Telegram: <b>@Oljaboyev_Anvar_2005</b>\n\n"
-        "Savol, taklif yoki murojaatingiz bo'lsa, quyidagi tugmani bosib bemalol yozishingiz mumkin:"
+        "Savol, taklif yoki hamkorlik bo'lsa, bemalol yozishingiz mumkin:"
     )
-    await update.message.reply_text(admin_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    keyboard = [
+        [InlineKeyboardButton("💬 Anvarga yozish (@Oljaboyev_Anvar_2005)", url="https://t.me/Oljaboyev_Anvar_2005")]
+    ]
+    await update.message.reply_text(
+        admin_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 
-# ----------------- 8. CAPTCHA TUGMALARI BOSILGANDA -----------------
-async def captcha_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Foydalanuvchi CAPTCHA tugmasini bosganda tekshirish."""
+# ----------------- 8. CAPTCHA VA INLINE AMALLAR -----------------
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query or not query.data:
         return
 
-    data = query.data.split(":")
-    if len(data) != 3 or data[0] != "cap":
+    data = query.data
+    user_id = query.from_user.id
+
+    # CAPTCHA tekshiruvi
+    if data.startswith("cap:"):
+        parts = data.split(":")
+        if len(parts) == 3:
+            target_user_id = int(parts[1])
+            selected_ans = int(parts[2])
+
+            if user_id != target_user_id:
+                await query.answer("⚠️ Bu tekshiruv siz uchun emas!", show_alert=True)
+                return
+
+            correct_ans = active_captchas.get(target_user_id)
+            if correct_ans is not None and selected_ans == correct_ans:
+                verified_users.add(target_user_id)
+                save_verified_user(
+                    target_user_id,
+                    first_name=query.from_user.first_name or "",
+                    username=query.from_user.username or "",
+                )
+                active_captchas.pop(target_user_id, None)
+
+                await query.answer("✅ To'g'ri javob!")
+                await query.edit_message_text(
+                    "✅ <b>Tabriklaymiz, siz inson ekanligingiz muvaffaqiyatli tasdiqlandi!</b>",
+                    parse_mode=ParseMode.HTML,
+                )
+
+                first_name = escape_tg_html(query.from_user.first_name) if query.from_user.first_name else "Do'stim"
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=get_welcome_text(first_name),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_main_keyboard(),
+                )
+                logger.info(f"Foydalanuvchi tasdiqlandi: {target_user_id}")
+            else:
+                await query.answer("❌ Noto'g'ri javob! Yangi misolni yeching.", show_alert=True)
+                text, kb = generate_captcha(target_user_id)
+                try:
+                    await query.edit_message_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+                except Exception:
+                    pass
         return
 
-    target_user_id = int(data[1])
-    selected_ans = int(data[2])
-    clicking_user_id = query.from_user.id
-
-    # Birovning tekshiruvini boshqa birov bosa olmaydi
-    if clicking_user_id != target_user_id:
-        await query.answer("⚠️ Bu tekshiruv siz uchun emas!", show_alert=True)
-        return
-
-    correct_ans = active_captchas.get(target_user_id)
-    if correct_ans is not None and selected_ans == correct_ans:
-        # To'g'ri javob! Bazaga yozish va xotiraga qo'shish
-        verified_users.add(target_user_id)
-        save_verified_user(
-            target_user_id,
-            first_name=query.from_user.first_name or "",
-            username=query.from_user.username or "",
-        )
-        active_captchas.pop(target_user_id, None)
-
-        await query.answer("✅ To'g'ri javob!")
-        await query.edit_message_text(
-            "✅ <b>Tabriklaymiz, siz muvaffaqiyatli tasdiqlandingiz!</b>",
+    # Xabar ostidagi tugmalar (action:...)
+    if data == "action:clear":
+        if user_id in user_chat_histories:
+            user_chat_histories[user_id].clear()
+        user_last_prompts.pop(user_id, None)
+        await query.answer("🗑 Suhbat xotirasi tozalandi!")
+        await query.message.reply_text(
+            "🗑 <b>Xotira tozalandi!</b> Yangi savolingizni yozavering.",
             parse_mode=ParseMode.HTML,
+            reply_markup=get_main_keyboard(),
         )
 
-        first_name = escape_tg_html(query.from_user.first_name) if query.from_user.first_name else "Do'stim"
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=get_welcome_text(first_name),
-            parse_mode=ParseMode.HTML,
+    elif data == "action:regenerate":
+        last_prompt = user_last_prompts.get(user_id)
+        if not last_prompt:
+            await query.answer("Oxirgi savol topilmadi. Yangidan yozing.", show_alert=True)
+            return
+
+        await query.answer("🔄 Yangi javob tayyorlanmoqda...")
+        history = get_user_history(user_id)
+
+        # Oxirgi javobni xotiradan olib tashlaymiz
+        if len(history) >= 2:
+            history.pop()  # model
+            history.pop()  # user
+
+        # Qayta javob olish
+        stop_typing = asyncio.Event()
+        typing_task = asyncio.create_task(
+            keep_typing_action(query.message.chat_id, context, stop_typing)
         )
-        logger.info(f"Inson foydalanuvchi tasdiqlandi: {target_user_id} - {first_name}")
-    else:
-        # Noto'g'ri javob: yangi misol beriladi
-        await query.answer("❌ Noto'g'ri javob! Yangi misolni yeching.", show_alert=True)
-        text, kb = generate_captcha(target_user_id)
         try:
-            await query.edit_message_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
-        except Exception:
-            pass
+            reply_text, engine = await ask_dual_engine(last_prompt, list(history))
+            history.append({"role": "user", "parts": [last_prompt]})
+            history.append({"role": "model", "parts": [reply_text]})
+
+            formatted = markdown_to_telegram_html(reply_text)
+            footer = f"\n\n⚡️ <i>Dvigatel: {engine}</i>"
+            await query.message.reply_text(
+                formatted + footer,
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_response_inline_keyboard(),
+            )
+        except Exception as e:
+            logger.error(f"Regenerate xatosi: {e}")
+            await query.message.reply_text("Kechirasiz, qayta javob shakllantirib bo'lmadi.")
+        finally:
+            stop_typing.set()
+            await typing_task
 
 
 # ----------------- 9. MATNLI XABARLARNI QAYTA ISHLASH -----------------
@@ -518,17 +666,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_text = update.message.text.strip()
 
-    # 1. ANTI-FLOOD FILTRI (Spambotlar shu joyning o'zidayoq to'xtatiladi!)
+    # Pastki menyu tugmalari bosilganda:
+    if user_text == "💬 Yangi mavzu (/clear)":
+        return await clear_command(update, context)
+    elif user_text == "📊 Mening profilim":
+        return await profile_command(update, context)
+    elif user_text == "ℹ️ Bot haqida":
+        return await help_command(update, context)
+    elif user_text == "👨‍💻 Admin bilan aloqa":
+        return await admin_command(update, context)
+
+    # 1. ANTI-FLOOD FILTRI
     allowed, reason = check_anti_flood(user_id)
     if not allowed:
         if reason == "flood_ban":
             await update.message.reply_text("⚠️ Juda ko'p so'rov yubordingiz. Siz 10 daqiqaga cheklandingiz!")
         elif reason == "rate_limit":
-            await update.message.reply_text("⚠️ Iltimos, shoshilmang! So'rovlar orasida 2 soniya kuting.")
-        # Banned bo'lsa umuman javob qaytarmaydi (serverni ortiqcha yuklamaslik uchun)
+            await update.message.reply_text("⚠️ Iltimos, shoshilmang! So'rovlar orasida biroz kuting.")
         return
 
-    # 2. CAPTCHA GATE FILTRI (Botlar bu to'siqdan o'ta olmaydi va Gemini ga yetib bormaydi!)
+    # 2. CAPTCHA GATE FILTRI (Spambotlar bu to'siqdan o'ta olmaydi)
     if user_id not in verified_users:
         text, kb = generate_captcha(user_id)
         await update.message.reply_text(
@@ -538,7 +695,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 3. FAQAT TASDIQLANGAN HAQIQIY INSONLAR UCHUN GEMINI AI ISHLAYDI:
+    # 3. AI DUAL-ENGINE GA YUBORISH (GROQ ⚡️ + GEMINI ♊️)
+    user_last_prompts[user_id] = user_text
     history = get_user_history(user_id)
 
     stop_typing_event = asyncio.Event()
@@ -547,8 +705,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        gemini_history = list(history)
-        reply_text = await ask_gemini_with_fallback(user_text, gemini_history)
+        reply_text, engine_used = await ask_dual_engine(user_text, list(history))
 
         if not reply_text:
             reply_text = "Kechirasiz, savolingizga javob shakllantirib bo'lmadi. Qaytadan urinib ko'ring."
@@ -557,22 +714,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         history.append({"role": "model", "parts": [reply_text]})
 
         chunks = split_message_text(reply_text)
-        for chunk in chunks:
+        for i, chunk in enumerate(chunks):
             html_chunk = markdown_to_telegram_html(chunk)
+
+            # Oxirgi bo'lak ostiga dvigatel belgisi va tezkor tugmalarni qo'yamiz
+            if i == len(chunks) - 1:
+                html_chunk += f"\n\n⚡️ <i>Dvigatel: {engine_used}</i>"
+                reply_markup = get_response_inline_keyboard()
+            else:
+                reply_markup = None
+
             try:
-                await update.message.reply_text(html_chunk, parse_mode=ParseMode.HTML)
+                await update.message.reply_text(
+                    html_chunk, parse_mode=ParseMode.HTML, reply_markup=reply_markup
+                )
             except Exception as e:
-                logger.warning(f"HTML yuborishda xatolik: {e}, oddiy matn ko'rinishida yuboriladi")
-                await update.message.reply_text(chunk)
+                logger.warning(f"HTML xatosi: {e}, oddiy matn ko'rinishida yuboriladi")
+                await update.message.reply_text(chunk, reply_markup=reply_markup)
 
     except Exception as error:
         logger.error(f"Xatolik yuz berdi: {error}", exc_info=True)
         error_msg = str(error)
 
-        if "429" in error_msg or "ResourceExhausted" in error_msg:
+        if "429" in error_msg or "ResourceExhausted" in error_msg or "rate" in error_msg.lower():
             user_friendly_error = (
-                "⚠️ Hozirda AI serveriga so'rovlar ko'payib ketdi (limit tugadi). "
-                "Iltimos, 1-2 daqiqa kuting va qayta yozib ko'ring."
+                "⚠️ Hozirda AI serveriga so'rovlar ko'payib ketdi. "
+                "Iltimos, 1 daqiqa kuting va qayta yozib ko'ring."
             )
         elif "blocked" in error_msg.lower() or "safety" in error_msg.lower():
             user_friendly_error = (
@@ -597,11 +764,11 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def post_init(application: Application) -> None:
-    """Telegram menyusini o'rnatish."""
     commands = [
         BotCommand("start", "🚀 Botni boshlash"),
         BotCommand("clear", "🗑 Xotirani tozalash"),
-        BotCommand("help", "ℹ️ Yordam"),
+        BotCommand("profile", "📊 Mening profilim"),
+        BotCommand("help", "ℹ️ Qo'llanma"),
         BotCommand("admin", "👨‍💻 Admin bilan bog'lanish"),
     ]
     await application.bot.set_my_commands(commands)
@@ -614,13 +781,11 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    """Render.com 24/7 web-xizmati uchun salomatlik tekshiruvi (Health Check)."""
-
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Anvar AI Bot is running 24/7!")
+        self.wfile.write(b"Anvar AI Bot is running 24/7 with Groq and Gemini!")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -631,27 +796,26 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
 
 def start_health_server():
-    """Render.com serverida 24/7 ishlab turishi uchun fon rejimida mini-server ishga tushirish."""
     port_str = os.getenv("PORT", "10000")
     try:
         port = int(port_str)
         server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        logger.info(f"Render uchun Health Check serveri {port}-portda ishga tushdi.")
+        logger.info(f"Render Health Check serveri {port}-portda ishga tushdi.")
     except Exception as e:
-        logger.warning(f"Health serverni ishga tushirishda xatolik: {e}")
+        logger.warning(f"Health server xatosi: {e}")
 
 
 # ----------------- 12. ASOSIY ISHGA TUSHIRISH (MAIN) -----------------
 def main():
-    # 1. Render.com health check o'tishi uchun darhol fon serverini yoqish
+    # 1. Render Health Check o'tishi uchun darhol fon serverini yoqish
     start_health_server()
 
     # 2. Baza jadvallarini tayyorlash
     init_db()
 
-    logger.info("Bot himoya tizimi (Anti-Spam CAPTCHA + Rate Limiter) bilan ishga tushirilmoqda...")
+    logger.info("Bot Dual-Engine (Groq + Gemini) va Elita Dizayn bilan ishga tushirilmoqda...")
 
     request_config = HTTPXRequest(
         connect_timeout=30.0,
@@ -672,11 +836,12 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("clear", clear_command))
     application.add_handler(CommandHandler("reset", clear_command))
+    application.add_handler(CommandHandler("profile", profile_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("admin", admin_command))
 
-    # CAPTCHA tugmalarini tekshirish handleri
-    application.add_handler(CallbackQueryHandler(captcha_callback_handler, pattern=r"^cap:"))
+    # Tugmalar (CAPTCHA va Action tugmalari)
+    application.add_handler(CallbackQueryHandler(callback_handler))
 
     # Matnli xabarlarni tutib olish
     application.add_handler(
@@ -692,4 +857,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
