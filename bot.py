@@ -632,27 +632,26 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
 def start_health_server():
     """Render.com serverida 24/7 ishlab turishi uchun fon rejimida mini-server ishga tushirish."""
-    port_str = os.getenv("PORT")
-    if port_str:
-        try:
-            port = int(port_str)
-            server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            logger.info(f"Render uchun Health Check serveri {port}-portda ishga tushdi.")
-        except Exception as e:
-            logger.warning(f"Health serverni ishga tushirishda xatolik: {e}")
+    port_str = os.getenv("PORT", "10000")
+    try:
+        port = int(port_str)
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        logger.info(f"Render uchun Health Check serveri {port}-portda ishga tushdi.")
+    except Exception as e:
+        logger.warning(f"Health serverni ishga tushirishda xatolik: {e}")
 
 
 # ----------------- 12. ASOSIY ISHGA TUSHIRISH (MAIN) -----------------
 def main():
-    print("🛡️ Bot himoya tizimi (Anti-Spam CAPTCHA + Rate Limiter) bilan ishga tushirilmoqda...")
+    # 1. Render.com health check o'tishi uchun darhol fon serverini yoqish
+    start_health_server()
 
-    # Baza jadvallarini tayyorlash
+    # 2. Baza jadvallarini tayyorlash
     init_db()
 
-    # Render.com uchun fon serverini yoqish
-    start_health_server()
+    logger.info("Bot himoya tizimi (Anti-Spam CAPTCHA + Rate Limiter) bilan ishga tushirilmoqda...")
 
     request_config = HTTPXRequest(
         connect_timeout=30.0,
@@ -687,9 +686,10 @@ def main():
     # Xatoliklarni boshqarish
     application.add_error_handler(error_handler)
 
-    print("✅ Bot muvaffaqiyatli ishga tushdi! Xabarlar kutilmoqda...")
+    logger.info("Bot muvaffaqiyatli ishga tushdi! Xabarlar kutilmoqda...")
     application.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
     main()
+
